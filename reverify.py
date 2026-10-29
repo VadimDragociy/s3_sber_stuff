@@ -60,12 +60,13 @@ def main():
                         racing_segments.append([s, e])
                 racing_segments = _merge_spans(racing_segments)
 
+                fps = rec.get("fps") or 25.0
                 clips = []
                 for j, (start, end) in enumerate(racing_segments):
                     clip_local = os.path.join(tmp_dir, f"clip{j}_{rec['filename']}")
                     try:
                         clip_export.cut_clip(local_path, start, end, clip_local)
-                        clip_key = clip_export.clip_s3_key(key, prefix, clips_prefix, start)
+                        clip_key = clip_export.clip_s3_key(key, prefix, clips_prefix, start, end, fps)
                         s3_store.upload(client, bucket, clip_key, clip_local)
                         clips.append({"start": start, "end": end, "s3_key": clip_key})
                     finally:

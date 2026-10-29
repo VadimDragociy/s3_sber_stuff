@@ -70,7 +70,7 @@ def process_one(client, bucket, key, local_path, prefix, clips_prefix, tmp_dir, 
             clip_local = os.path.join(tmp_dir, f"w{task_id}_clip{i}_{os.path.basename(key)}")
             try:
                 clip_export.cut_clip(local_path, start, end, clip_local)
-                clip_key = clip_export.clip_s3_key(key, prefix, clips_prefix, start)
+                clip_key = clip_export.clip_s3_key(key, prefix, clips_prefix, start, end, det["fps"])
                 s3_store.upload(client, bucket, clip_key, clip_local)
                 clips.append({"start": start, "end": end, "s3_key": clip_key})
             finally:
