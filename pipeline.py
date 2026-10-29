@@ -29,6 +29,11 @@ def setup_logging(log_path):
 
 
 def load_processed_keys(manifest_path):
+    """Only status="ok" counts as done, so a transient failure (a crashed
+    ffmpeg call, an API timeout, ...) gets retried on the next run instead
+    of silently and permanently skipping that video - confirmed this
+    mattered: 97 videos errored out in one run before the cause was fixed,
+    and without this they'd never have been attempted again."""
     done = set()
     if os.path.exists(manifest_path):
         with open(manifest_path, "r", encoding="utf-8") as f:
@@ -37,7 +42,9 @@ def load_processed_keys(manifest_path):
                 if not line:
                     continue
                 try:
-                    done.add(json.loads(line)["s3_key"])
+                    rec = json.loads(line)
+                    if rec.get("status") == "ok":
+                        done.add(rec["s3_key"])
                 except (json.JSONDecodeError, KeyError):
                     pass
     return done

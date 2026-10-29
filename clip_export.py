@@ -40,9 +40,18 @@ _SOURCE_NAME_RE = re.compile(
 
 
 def cut_with_ffmpeg(src, start, end, dst):
+    # -threads 1: libx264 defaults to one encoder thread per CPU core, so
+    # without this every one of the 8 concurrent workers' ffmpeg calls (one
+    # per clip, several clips per video) spawns its own large thread pool -
+    # the same multiplication problem already fixed for cv2's decoder.
+    # Confirmed on the real deploy target: without it, the cgroup's task
+    # count hit 360+ (vs. ~55 expected for 8 workers) and ffmpeg itself
+    # started failing outright (exit 187/245) under the resulting CPU-quota
+    # starvation - 97 of the first 1725 videos errored out before this was
+    # caught and the run was stopped.
     subprocess.run(
         ["ffmpeg", "-y", "-ss", str(start), "-to", str(end), "-i", src,
-         "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", dst],
+         "-c:v", "libx264", "-preset", "veryfast", "-threads", "1", "-c:a", "aac", dst],
         check=True, capture_output=True,
     )
 
