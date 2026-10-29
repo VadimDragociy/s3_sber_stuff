@@ -3,15 +3,16 @@ import re
 import shutil
 import subprocess
 
-os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "threads;1")
-
 import cv2
 
 # See the matching comment in segment_detector.py: caps OpenCV's own
-# internal per-call parallelism (and, via the env var above, FFmpeg's
-# internal decode-thread pool) so N worker threads don't multiply into
-# far more OS threads than --workers would suggest.
+# internal per-call parallelism, and - via CAP_PROP_N_THREADS passed at
+# VideoCapture-open time below (the only thing that actually worked) -
+# FFmpeg's internal decode-thread pool, so N worker threads don't multiply
+# into far more OS threads than --workers would suggest.
 cv2.setNumThreads(1)
+
+_SINGLE_THREAD_DECODE = [cv2.CAP_PROP_N_THREADS, 1]
 
 # Source filenames look like:
 #   IgoraDrive_07_08_26__C-03__2026_08_07-09_45_26_014_00410_00445_000_00000_00012.mp4
@@ -36,7 +37,7 @@ def cut_with_ffmpeg(src, start, end, dst):
 
 
 def cut_with_opencv(src, start, end, dst):
-    cap = cv2.VideoCapture(src)
+    cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG, _SINGLE_THREAD_DECODE)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
