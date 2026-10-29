@@ -1,49 +1,11 @@
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import tempfile
 
-import cv2
-
+import clip_export
 from env_config import load_env_file
 import s3_store
-
-
-def cut_with_ffmpeg(src, start, end, dst):
-    subprocess.run(
-        ["ffmpeg", "-y", "-ss", str(start), "-to", str(end), "-i", src,
-         "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", dst],
-        check=True, capture_output=True,
-    )
-
-
-def cut_with_opencv(src, start, end, dst):
-    cap = cv2.VideoCapture(src)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    start_frame, end_frame = int(start * fps), int(end * fps)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-
-    writer = cv2.VideoWriter(dst, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    idx = start_frame
-    while idx < end_frame:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        writer.write(frame)
-        idx += 1
-    writer.release()
-    cap.release()
-
-
-def cut_clip(src, start, end, dst):
-    if shutil.which("ffmpeg"):
-        cut_with_ffmpeg(src, start, end, dst)
-    else:
-        cut_with_opencv(src, start, end, dst)
 
 
 def main():
@@ -78,12 +40,12 @@ def main():
                 downloaded_here = True
 
             base, ext = os.path.splitext(filename)
-            for i, (start, end) in enumerate(rec["racing_segments_sec"]):
-                dst = os.path.join(args.output_dir, f"{base}__seg{i:02d}_{start:.1f}-{end:.1f}{ext}")
+            for start, end in rec["racing_segments_sec"]:
+                dst = os.path.join(args.output_dir, f"{base}_{start:.2f}{ext}")
                 if os.path.exists(dst):
                     continue
                 print(f"  cutting [{start:.1f}, {end:.1f}] -> {dst}")
-                cut_clip(local_path, start, end, dst)
+                clip_export.cut_clip(local_path, start, end, dst)
 
             if downloaded_here and args.delete_source_after:
                 os.remove(local_path)

@@ -29,3 +29,7 @@ def list_videos(client, bucket, prefix, suffix=".mp4"):
 def download(client, bucket, key, local_path):
     os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
     client.download_file(bucket, key, local_path)
+
+
+def upload(client, bucket, key, local_path):
+    client.upload_file(local_path, bucket, key)
