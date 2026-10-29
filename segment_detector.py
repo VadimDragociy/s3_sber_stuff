@@ -1,6 +1,14 @@
 import cv2
 import numpy as np
 
+# pipeline.py runs this across N worker THREADS in one process; OpenCV's own
+# internal parallelism (used per-call for resize/cvtColor/etc.) multiplies on
+# top of that and isn't capped by --workers. Left at OpenCV's default this
+# spawned 200+ threads and a load-average spike within seconds on a shared
+# box that also runs other production workloads - one real OpenCV thread per
+# Python worker thread is plenty for these frame sizes.
+cv2.setNumThreads(1)
+
 
 def _read_sampled_gray_frames(video_path, sample_hz, max_dim, start_sec=None, end_sec=None):
     cap = cv2.VideoCapture(video_path)

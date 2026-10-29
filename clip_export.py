@@ -5,6 +5,11 @@ import subprocess
 
 import cv2
 
+# See the matching comment in segment_detector.py: caps OpenCV's own
+# internal per-call parallelism so N worker threads don't multiply into
+# far more OS threads than --workers would suggest.
+cv2.setNumThreads(1)
+
 # Source filenames look like:
 #   IgoraDrive_07_08_26__C-03__2026_08_07-09_45_26_014_00410_00445_000_00000_00012.mp4
 #   <place>_<date DD_MM_YY>__<camera>__<recording start YYYY_MM_DD-HH_MM_SS>_<...>
