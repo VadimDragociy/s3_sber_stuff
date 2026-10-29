@@ -3,10 +3,13 @@ import re
 import shutil
 import subprocess
 
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "threads;1")
+
 import cv2
 
 # See the matching comment in segment_detector.py: caps OpenCV's own
-# internal per-call parallelism so N worker threads don't multiply into
+# internal per-call parallelism (and, via the env var above, FFmpeg's
+# internal decode-thread pool) so N worker threads don't multiply into
 # far more OS threads than --workers would suggest.
 cv2.setNumThreads(1)
 

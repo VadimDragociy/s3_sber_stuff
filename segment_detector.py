@@ -1,12 +1,19 @@
+import os
+
+# Must be set before cv2 opens its first VideoCapture: this is what actually
+# caps libavcodec's internal decode-thread pool. cv2.setNumThreads() below
+# only limits OpenCV's OWN parallel_for use (resize/cvtColor/...) and does
+# nothing for FFmpeg-backend video decoding - confirmed on the real deploy
+# target, where setNumThreads(1) alone still left ~300-400 OS threads and a
+# load-average spike with 8 worker threads each decoding their own video.
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "threads;1")
+
 import cv2
 import numpy as np
 
-# pipeline.py runs this across N worker THREADS in one process; OpenCV's own
-# internal parallelism (used per-call for resize/cvtColor/etc.) multiplies on
-# top of that and isn't capped by --workers. Left at OpenCV's default this
-# spawned 200+ threads and a load-average spike within seconds on a shared
-# box that also runs other production workloads - one real OpenCV thread per
-# Python worker thread is plenty for these frame sizes.
+# Caps OpenCV's own internal per-call parallelism so N worker threads don't
+# multiply into far more OS threads than --workers would suggest. See the
+# decode-thread note above for why this alone isn't sufficient.
 cv2.setNumThreads(1)
 
 
