@@ -58,7 +58,20 @@ def _call_vision_model(model, images_b64, base_url=None, api_key=None, timeout=6
         },
         timeout=timeout,
     )
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError:
+        # sam3.1 turns out to be a real Segment-Anything model, not a
+        # general vision-QA endpoint: it 400s on this chat-style request
+        # every time ("Invalid SAM options" / "at most one image"),
+        # regardless of image count - confirmed empirically against the
+        # real endpoint. The original design assumed a parseable low-
+        # confidence JSON reply to trigger the gpt6-luna fallback below;
+        # in practice it's always a hard HTTP error, which this converts
+        # into the same (None, None, None) "couldn't resolve" signal so
+        # verify_segment's existing fallback still fires instead of the
+        # whole call crashing.
+        return None, None, None
     text = resp.json()["choices"][0]["message"]["content"]
     try:
         start, end = text.index("{"), text.rindex("}") + 1
