@@ -38,11 +38,22 @@ def _read_sampled_gray_frames(video_path, sample_hz, max_dim, start_sec=None, en
     return frames, times, fps, duration, (W, H)
 
 
-def _corner_roi_mask(W, H, corner_frac):
+def _corner_roi_mask(W, H, corner_frac, sky_frac=0.12):
+    """Excludes the 4 corners (fixed overlays/fixtures) AND a band across
+    the top of frame. The top band was added after validating against real
+    footage: false-positive tracks consistently turned out to be birds,
+    sun glints or treeline/sky structure sitting at the very top of frame
+    (y_frac <= ~0.19 in every case found) - a trackside camera's sky/
+    treeline never contains a racing car, so it's safe and cheap to drop
+    entirely rather than rely on texture/shape/motion to reject it after
+    the fact."""
     mask = np.full((H, W), 255, dtype=np.uint8)
     bw, bh = int(W * corner_frac), int(H * corner_frac)
     for x0, y0 in [(0, 0), (W - bw, 0), (0, H - bh), (W - bw, H - bh)]:
         mask[y0:y0 + bh, x0:x0 + bw] = 0
+    sky_h = int(H * sky_frac)
+    if sky_h > 0:
+        mask[0:sky_h, :] = 0
     return mask
 
 
@@ -92,7 +103,11 @@ def _motion_consistency(centroids):
     """Average cosine similarity between consecutive displacement vectors.
     Close to 1 = steady one-directional travel (a car driving through
     frame); close to 0/negative = jitter (flicker, noise). Tracks too
-    short to judge a direction change are not penalized."""
+    short to judge a direction change are not penalized.
+
+    This is direction-only and says nothing about distance - a track that
+    barely moves at all can still look "consistent" by chance over 1-2
+    steps. Pair it with _avg_step_frac, which catches that case."""
     if len(centroids) < 3:
         return 1.0
     vecs = []
@@ -107,12 +122,31 @@ def _motion_consistency(centroids):
     return float(np.mean(sims))
 
 
-def _secondary_decision(texture_score, shape_ratio, motion_consistency,
-                         texture_min, shape_ratio_min, shape_ratio_max, motion_consistency_min):
+def _avg_step_frac(centroids, diag):
+    """Average per-sample displacement as a fraction of the frame diagonal.
+    Added after validating against real footage: a sun glint or a painted
+    line catching the light stays in essentially the same pixels while its
+    apparent size changes, which can pass the direction-consistency check
+    by chance even though nothing is actually travelling. A real car
+    covers measurable ground between samples; this is what tells the two
+    apart when shape/texture/direction alone don't."""
+    if len(centroids) < 2 or diag <= 0:
+        return 0.0
+    steps = [
+        ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+        for (x0, y0), (x1, y1) in zip(centroids[:-1], centroids[1:])
+    ]
+    return float(np.mean(steps)) / diag
+
+
+def _secondary_decision(texture_score, shape_ratio, motion_consistency, avg_step_frac,
+                         texture_min, shape_ratio_min, shape_ratio_max,
+                         motion_consistency_min, min_motion_frac):
     return (
         texture_score >= texture_min
         and shape_ratio_min <= shape_ratio <= shape_ratio_max
         and motion_consistency >= motion_consistency_min
+        and avg_step_frac >= min_motion_frac
     )
 
 
@@ -132,10 +166,12 @@ def detect_racing_segments(
     weak_area_ratio=1.3,
     merge_gap_sec=1.0,
     pad_sec=0.5,
+    sky_frac=0.12,
     texture_min=18.0,
     shape_ratio_min=0.8,
     shape_ratio_max=6.0,
     motion_consistency_min=0.3,
+    min_motion_frac=0.01,
 ):
     """Zero-cost background-subtraction detector, tracking only the single
     largest ROI blob per sample (avoids chaining unrelated noise specks).
@@ -161,10 +197,20 @@ def detect_racing_segments(
         plausible range; a thin light streak or near-square speck isn't).
       - motion_consistency: how steadily the blob travels in one direction
         (a driving car is steady; flicker/noise is not).
-    These thresholds are heuristic defaults, not tuned against labeled
-    ground truth - spot-check a sample batch's "borderline_resolved" log
-    before trusting this at scale, and adjust the *_min/*_max kwargs above
-    if it's over- or under-including.
+      - avg_step_frac: how far it actually moves between samples, as a
+        fraction of the frame diagonal (direction can look "consistent"
+        over 1-2 steps even for something that barely moves at all - a
+        glint that holds its position while only its apparent size
+        changes, for instance).
+    None of this is tuned against labeled ground truth. It was validated
+    by hand against real clips: every false positive found traced back to
+    either a track sitting in the top ~15-20% of frame (birds, clouds, sky/
+    treeline structure - hence sky_frac masking out the top band before
+    tracking even starts) or a near-static blob whose direction happened
+    to look consistent by chance (hence min_motion_frac). Spot-check a
+    sample batch's "borderline_resolved" log before trusting this at
+    scale, and adjust the kwargs above if it's still over- or
+    under-including.
 
     Returns:
       - confirmed_segments: everything accepted as a moving racing vehicle,
@@ -181,7 +227,7 @@ def detect_racing_segments(
 
     stack = np.stack(frames, axis=0).astype(np.float32)
     bg = np.median(stack, axis=0).astype(np.uint8)
-    roi_mask = _corner_roi_mask(W, H, corner_frac)
+    roi_mask = _corner_roi_mask(W, H, corner_frac, sky_frac)
     diag = (W ** 2 + H ** 2) ** 0.5
     max_link_dist = diag * max_link_dist_frac
 
@@ -233,25 +279,48 @@ def detect_racing_segments(
         span = (tr["start_t"], tr["last_t"])
         nd_frac = net_disp(tr) / diag
         ar = tr["area_max"] / max(1.0, tr["area_min"])
+        shape_ratio = _median_shape_ratio(tr["bboxes"])
 
-        if ar >= strong_area_ratio or nd_frac >= strong_net_disp_frac:
+        # Real, substantial lateral travel (>= strong_net_disp_frac) is
+        # strong enough evidence on its own - no shape gate here, because
+        # a long track following a car's full approach legitimately swings
+        # from a wide/flat silhouette at a distance to a squarer one up
+        # close, which can push its MEDIAN shape_ratio past a threshold
+        # tuned on short, single-distance borderline segments. Gating this
+        # branch false-rejected a real car pass during validation.
+        if nd_frac >= strong_net_disp_frac:
             confirmed.append(span)
             continue
+        if ar >= strong_area_ratio:
+            # Area alone can swing this much from a lighting change on a
+            # static object (a glint that brightens/dims) without the
+            # object actually going anywhere, so here - unlike the
+            # real-travel branch above - also require it to have covered
+            # real ground. (A shape check was tried here too, but a real
+            # car's bounding box legitimately gets very wide/flat while
+            # still distant, so it was dropped from this branch - distance
+            # covered is the more reliable signal for "area grew because
+            # it's approaching" vs. "area grew because the sun caught it".)
+            if _avg_step_frac(tr["centroids"], diag) >= min_motion_frac:
+                confirmed.append(span)
+                continue
         if nd_frac < weak_net_disp_frac and ar < weak_area_ratio:
             continue  # jitter/artifact, drop for free
 
         texture_score = float(np.median(tr["textures"])) if tr["textures"] else 0.0
-        shape_ratio = _median_shape_ratio(tr["bboxes"])
         motion_consistency = _motion_consistency(tr["centroids"])
+        avg_step_frac = _avg_step_frac(tr["centroids"], diag)
         is_racing = _secondary_decision(
-            texture_score, shape_ratio, motion_consistency,
-            texture_min, shape_ratio_min, shape_ratio_max, motion_consistency_min,
+            texture_score, shape_ratio, motion_consistency, avg_step_frac,
+            texture_min, shape_ratio_min, shape_ratio_max,
+            motion_consistency_min, min_motion_frac,
         )
         result["borderline_resolved"].append({
             "span": [round(span[0], 2), round(span[1], 2)],
             "texture_score": round(texture_score, 1),
             "shape_ratio": round(shape_ratio, 2),
             "motion_consistency": round(motion_consistency, 2),
+            "avg_step_frac": round(avg_step_frac, 4),
             "racing": is_racing,
         })
         if is_racing:
@@ -274,8 +343,9 @@ def detect_racing_segments(
 def classify_span(
     video_path, start_sec, end_sec,
     sample_hz=6.0, max_dim=960, pad_sec=1.0,
-    corner_frac=0.09, diff_thresh=22, min_blob_area=10,
-    texture_min=18.0, shape_ratio_min=0.8, shape_ratio_max=6.0, motion_consistency_min=0.3,
+    corner_frac=0.09, sky_frac=0.12, diff_thresh=22, min_blob_area=10,
+    texture_min=18.0, shape_ratio_min=0.8, shape_ratio_max=6.0,
+    motion_consistency_min=0.3, min_motion_frac=0.01,
 ):
     """Classify one already-recorded 'uncertain' span from an OLD manifest
     (collected before this rewrite, back when such spans were deferred to
@@ -294,7 +364,8 @@ def classify_span(
 
     stack = np.stack(frames, axis=0).astype(np.float32)
     bg = np.median(stack, axis=0).astype(np.uint8)
-    roi_mask = _corner_roi_mask(W, H, corner_frac)
+    roi_mask = _corner_roi_mask(W, H, corner_frac, sky_frac)
+    diag = (W ** 2 + H ** 2) ** 0.5
 
     centroids, bboxes, textures = [], [], []
     for gray in frames:
@@ -312,12 +383,15 @@ def classify_span(
     texture_score = float(np.median(textures))
     shape_ratio = _median_shape_ratio(bboxes)
     motion_consistency = _motion_consistency(centroids)
+    avg_step_frac = _avg_step_frac(centroids, diag)
     is_racing = _secondary_decision(
-        texture_score, shape_ratio, motion_consistency,
-        texture_min, shape_ratio_min, shape_ratio_max, motion_consistency_min,
+        texture_score, shape_ratio, motion_consistency, avg_step_frac,
+        texture_min, shape_ratio_min, shape_ratio_max,
+        motion_consistency_min, min_motion_frac,
     )
     return is_racing, {
         "texture_score": round(texture_score, 1),
         "shape_ratio": round(shape_ratio, 2),
         "motion_consistency": round(motion_consistency, 2),
+        "avg_step_frac": round(avg_step_frac, 4),
     }
