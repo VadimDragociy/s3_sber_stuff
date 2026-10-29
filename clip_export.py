@@ -16,15 +16,26 @@ _SINGLE_THREAD_DECODE = [cv2.CAP_PROP_N_THREADS, 1]
 
 # Source filenames look like:
 #   IgoraDrive_07_08_26__C-03__2026_08_07-09_45_26_014_00410_00445_000_00000_00012.mp4
-#   <place>_<date DD_MM_YY>__<camera>__<recording start YYYY_MM_DD-HH_MM_SS>_<...>
-# Only the place/date/camera/recording-start prefix is reused for the clip name;
-# everything after it (segment index, source frame range, sub-clip range) is
-# specific to how the source pipeline chopped up the day's footage and is
-# replaced wholesale by our own first/last frame numbers.
+#   <place>_<date DD_MM_YY>__<camera>__<recording start YYYY_MM_DD-HH_MM_SS>_<seg_idx>_<day_sec_start>_<day_sec_end>_<...>
+# <day_sec_start>/<day_sec_end> is this short (12-70s) source file's own
+# position, in SECONDS, within the full continuous per-camera recording
+# session named by <recording start> - confirmed empirically (their
+# difference always matches the clip's duration_sec). That field is what
+# makes a clip name unique, NOT <recording start> alone: every one of the
+# ~10-20 short segments cut from one continuous recording session shares
+# the exact same <recording start>, camera and date. A first version of
+# this function built frame numbers from start_sec/end_sec alone (offsets
+# into the just-downloaded short segment) and silently collided - two
+# different segments of the same session producing the same output
+# filename, one overwriting the other in S3 - confirmed on real output:
+# 149 of 9372 distinct clip keys in a production run turned out to be
+# claimed by more than one source video. <day_sec_start> anchors the frame
+# numbers to the full session instead, which is unique per segment.
 _SOURCE_NAME_RE = re.compile(
     r"^(?P<place>.+)_(?P<date>\d{2}_\d{2}_\d{2})"
     r"__(?P<camera>[A-Za-z]+-\d+)"
     r"__(?P<start_time>\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2})"
+    r"_(?P<seg_idx>\d+)_(?P<day_sec_start>\d+)_(?P<day_sec_end>\d+)"
 )
 
 
@@ -66,23 +77,26 @@ def cut_clip(src, start, end, dst):
 def clip_filename(source_filename, start_sec, end_sec, fps):
     """{date}_{place}_{camera}_{recording_start}_{first_frame}_{last_frame}.ext
 
-    first_frame/last_frame are this clip's own start/end, as frame numbers
-    into the SOURCE file (the mp4 the pipeline downloaded and is cutting
-    from) - not the day's full continuous recording, and not seconds.
-    Everything else is carried over unchanged from the source filename.
-    Falls back to a plain "<source base>_<start>-<end>s<ext>" name if the
-    source filename doesn't match the expected pattern, so an unexpected
-    naming convention never breaks the upload.
+    first_frame/last_frame are this clip's start/end as frame numbers into
+    the full continuous recording SESSION (anchored via the source
+    filename's own day_sec_start - see the regex comment above), not just
+    the short file the pipeline happened to download - that's what keeps
+    them unique across the session's other segments. Falls back to a
+    plain "<source base>_<start>-<end>s<ext>" name (which keeps the whole
+    original, already-unique filename) if the source filename doesn't
+    match the expected pattern, so an unexpected naming convention never
+    breaks the upload - and never silently collides either.
     """
     base, ext = os.path.splitext(source_filename)
     m = _SOURCE_NAME_RE.match(base)
-    first_frame = round(start_sec * fps)
-    last_frame = round(end_sec * fps)
     if not m:
         return f"{base}_{start_sec:.2f}-{end_sec:.2f}s{ext}"
+    day_sec_start = int(m["day_sec_start"])
+    first_frame = round((day_sec_start + start_sec) * fps)
+    last_frame = round((day_sec_start + end_sec) * fps)
     return (
         f"{m['date']}_{m['place']}_{m['camera']}_{m['start_time']}"
-        f"_{first_frame:05d}_{last_frame:05d}{ext}"
+        f"_{first_frame:06d}_{last_frame:06d}{ext}"
     )
 
 
