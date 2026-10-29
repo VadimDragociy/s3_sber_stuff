@@ -186,6 +186,7 @@ def detect_racing_segments(
     shape_ratio_max=6.0,
     motion_consistency_min=0.3,
     min_motion_frac=0.01,
+    borderline_resolver=None,
 ):
     """Zero-cost background-subtraction detector, tracking only the single
     largest ROI blob per sample (avoids chaining unrelated noise specks).
@@ -226,11 +227,18 @@ def detect_racing_segments(
     scale, and adjust the kwargs above if it's still over- or
     under-including.
 
+    borderline_resolver, if given, replaces the classical heuristic above
+    for ambiguous tracks: called as resolver(video_path, start_sec, end_sec)
+    -> (is_racing: bool, info: dict), e.g. verification.verify_segment
+    wrapped to that shape. Used to A/B the classical heuristic against
+    real vision-model calls on identical primary-pass tracks.
+
     Returns:
       - confirmed_segments: everything accepted as a moving racing vehicle,
-        in seconds - no paid model involved at any point.
+        in seconds - no paid model involved at any point (unless
+        borderline_resolver is passed).
       - borderline_resolved: diagnostic log of every ambiguous track and
-        how the secondary heuristic scored/decided it, for spot-checking.
+        how it was scored/decided, for spot-checking.
     """
     frames, times, fps, duration, (W, H) = _read_sampled_gray_frames(video_path, sample_hz, max_dim)
     result = {"confirmed_segments": [], "fps": fps,
@@ -321,22 +329,30 @@ def detect_racing_segments(
         if nd_frac < weak_net_disp_frac and ar < weak_area_ratio:
             continue  # jitter/artifact, drop for free
 
-        texture_score = float(np.median(tr["textures"])) if tr["textures"] else 0.0
-        motion_consistency = _motion_consistency(tr["centroids"])
-        avg_step_frac = _avg_step_frac(tr["centroids"], diag)
-        is_racing = _secondary_decision(
-            texture_score, shape_ratio, motion_consistency, avg_step_frac,
-            texture_min, shape_ratio_min, shape_ratio_max,
-            motion_consistency_min, min_motion_frac,
-        )
-        result["borderline_resolved"].append({
-            "span": [round(span[0], 2), round(span[1], 2)],
-            "texture_score": round(texture_score, 1),
-            "shape_ratio": round(shape_ratio, 2),
-            "motion_consistency": round(motion_consistency, 2),
-            "avg_step_frac": round(avg_step_frac, 4),
-            "racing": is_racing,
-        })
+        if borderline_resolver is not None:
+            is_racing, info = borderline_resolver(video_path, span[0], span[1])
+            result["borderline_resolved"].append({
+                "span": [round(span[0], 2), round(span[1], 2)],
+                "racing": is_racing,
+                **(info or {}),
+            })
+        else:
+            texture_score = float(np.median(tr["textures"])) if tr["textures"] else 0.0
+            motion_consistency = _motion_consistency(tr["centroids"])
+            avg_step_frac = _avg_step_frac(tr["centroids"], diag)
+            is_racing = _secondary_decision(
+                texture_score, shape_ratio, motion_consistency, avg_step_frac,
+                texture_min, shape_ratio_min, shape_ratio_max,
+                motion_consistency_min, min_motion_frac,
+            )
+            result["borderline_resolved"].append({
+                "span": [round(span[0], 2), round(span[1], 2)],
+                "texture_score": round(texture_score, 1),
+                "shape_ratio": round(shape_ratio, 2),
+                "motion_consistency": round(motion_consistency, 2),
+                "avg_step_frac": round(avg_step_frac, 4),
+                "racing": is_racing,
+            })
         if is_racing:
             confirmed.append(span)
 

@@ -34,11 +34,11 @@ def main():
             print(f"  classical: racing={classical_racing} {classical_metrics}")
 
             try:
-                vision_racing, resolved_by, vehicle_type = verification.verify_segment(video, s, e)
-                print(f"  vision:    racing={vision_racing} resolved_by={resolved_by} vehicle_type={vehicle_type}")
+                vision_racing, resolved_by, vehicle_type, usage = verification.verify_segment(video, s, e)
+                print(f"  vision:    racing={vision_racing} resolved_by={resolved_by} vehicle_type={vehicle_type} usage={usage}")
                 vision_error = None
             except Exception as exc:
-                vision_racing, resolved_by, vehicle_type = None, None, None
+                vision_racing, resolved_by, vehicle_type, usage = None, None, None, {}
                 vision_error = str(exc)
                 print(f"  vision:    ERROR {vision_error}")
 

@@ -20,8 +20,11 @@ PROMPT = (
 )
 
 
+_SINGLE_THREAD_DECODE = [cv2.CAP_PROP_N_THREADS, 1]
+
+
 def extract_frames_b64(video_path, timestamps_sec, max_dim=640):
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG, _SINGLE_THREAD_DECODE)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     out = []
     for t in timestamps_sec:
@@ -70,9 +73,11 @@ def _call_vision_model(model, images_b64, base_url=None, api_key=None, timeout=6
         # in practice it's always a hard HTTP error, which this converts
         # into the same (None, None, None) "couldn't resolve" signal so
         # verify_segment's existing fallback still fires instead of the
-        # whole call crashing.
-        return None, None, None
-    text = resp.json()["choices"][0]["message"]["content"]
+        # whole call crashing. No tokens are spent on a failed call.
+        return None, None, None, {}
+    data = resp.json()
+    text = data["choices"][0]["message"]["content"]
+    usage = data.get("usage", {})
     try:
         start, end = text.index("{"), text.rindex("}") + 1
         parsed = json.loads(text[start:end])
@@ -80,16 +85,21 @@ def _call_vision_model(model, images_b64, base_url=None, api_key=None, timeout=6
             bool(parsed.get("racing")),
             float(parsed.get("confidence", 0.5)),
             parsed.get("vehicle_type", "unknown"),
+            usage,
         )
     except (ValueError, KeyError):
-        return None, None, None
+        return None, None, None, usage
 
 
 def verify_segment(video_path, start_sec, end_sec, sam_model=None, luna_model=None):
     """Resolve one 'uncertain' segment with the minimum possible paid calls:
     1 SAM3.1 call on a handful of representative frames. Only if SAM3.1
     itself comes back low-confidence, escalate the SAME frames to gpt6-luna.
-    Returns (is_racing: bool, resolved_by: str, vehicle_type: str).
+    Returns (is_racing: bool, resolved_by: str, vehicle_type: str,
+    usage: dict) - usage is the token-usage dict from whichever call
+    actually produced the answer (SAM3.1 never does in practice - see the
+    comment in _call_vision_model - so in current use this is always the
+    gpt6-luna call's usage, or {} if nothing could be resolved).
     """
     mid = (start_sec + end_sec) / 2
     span = max(0.5, (end_sec - start_sec) / 4)
@@ -100,16 +110,23 @@ def verify_segment(video_path, start_sec, end_sec, sam_model=None, luna_model=No
 
     frames_b64 = extract_frames_b64(video_path, timestamps)
     if not frames_b64:
-        return False, "no_frames", "none"
+        return False, "no_frames", "none", {}
 
     sam_model = sam_model or os.environ.get("LITELLM_SAM_MODEL", "sam3.1")
-    is_racing, confidence, vehicle_type = _call_vision_model(sam_model, frames_b64)
+    is_racing, confidence, vehicle_type, usage = _call_vision_model(sam_model, frames_b64)
     if is_racing is not None and confidence is not None and confidence >= 0.6:
-        return is_racing, "sam3.1", vehicle_type
+        return is_racing, "sam3.1", vehicle_type, usage
 
-    luna_model = luna_model or os.environ.get("LITELLM_LUNA_MODEL", "gpt6-luna")
-    is_racing, _confidence, vehicle_type = _call_vision_model(luna_model, frames_b64)
+    luna_model = luna_model or os.environ.get("LITELLM_LUNA_MODEL", "chatgpt/gpt-6-luna")
+    is_racing, _confidence, vehicle_type, usage = _call_vision_model(luna_model, frames_b64)
     if is_racing is not None:
-        return is_racing, "gpt6-luna", vehicle_type
+        return is_racing, "gpt6-luna", vehicle_type, usage
 
-    return False, "unresolved", "none"
+    return False, "unresolved", "none", usage
+
+
+def verify_segment_resolver(video_path, start_sec, end_sec):
+    """Adapts verify_segment to the (is_racing, info_dict) shape
+    segment_detector.detect_racing_segments' borderline_resolver expects."""
+    is_racing, resolved_by, vehicle_type, usage = verify_segment(video_path, start_sec, end_sec)
+    return is_racing, {"resolved_by": resolved_by, "vehicle_type": vehicle_type, "usage": usage}
